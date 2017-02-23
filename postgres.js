@@ -125,6 +125,10 @@
                       config.ssl = node.postgresConfig.ssl;
                     }
 
+                    pg.on('error', function(e) {
+                        node.error(e.Error);
+                    });
+
                     pg.connect( config, function(err, client, done) {
 
                         try {

@@ -3,8 +3,8 @@
   "version": "0.6.2",
   "description": "A Node-RED node to query PostgreSql",
   "dependencies": {
-    "pg": "6.1.0",
-    "node-postgres-named": "2.2.0",
+    "pg": "6.1.2",
+    "node-postgres-named": "2.4.1",
     "querystring": "0.2.0",
     "knex": "0.9.0",
     "pg-connection-string": "0.1.3"
