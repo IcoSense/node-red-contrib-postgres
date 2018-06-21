@@ -15,8 +15,7 @@
  **/
 
 
-
- module.exports = function(RED) {
+module.exports = function(RED) {
     "use strict";
     var pg=require('pg');
     var pgBuilder = require('knex')({client: 'pg'});
@@ -96,6 +95,12 @@
         });
     RED.nodes.registerType("postgresarray",PostgresArrayNode);
 
+    pg.on('error', errorHandler);
+
+    function errorHandler(e) {
+        RED.error(e.Error);
+    }
+
     function PostgresNode(n) {
     	RED.nodes.createNode(this,n);
 
@@ -108,7 +113,7 @@
         var node = this;
 
         if(this.postgresConfig) {
-
+            
     		node.on('input', function(msg){
                 
                 try {
@@ -125,9 +130,7 @@
                       config.ssl = node.postgresConfig.ssl;
                     }
 
-                    pg.on('error', function(e) {
-                        node.error(e.Error);
-                    });
+                    
 
                     pg.connect( config, function(err, client, done) {
 
@@ -173,8 +176,10 @@
 
         this.on("close", function() {
             if(node.clientdb) node.clientdb.end();
+            //pg.remove('error', errorHandler);
         });
 
+        
     }
 
     function _prepareColumns(payload,columns) {
