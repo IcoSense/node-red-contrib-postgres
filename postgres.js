@@ -14,326 +14,155 @@
  * limitations under the License.
  **/
 
-
-module.exports = function(RED) {
-    "use strict";
-    var pg=require('pg');
-    var pgBuilder = require('knex')({client: 'pg'});
-    var named=require('node-postgres-named');
-    var querystring = require('querystring');
-    var pools = {};
-    RED.httpAdmin.get('/postgresdb/:id',function(req,res) {
-        var credentials = RED.nodes.getCredentials(req.params.id);
-        if (credentials) {
-            res.send(JSON.stringify({user:credentials.user,hasPassword:(credentials.password&&credentials.password!="")}));
-        } else {
-            res.send(JSON.stringify({}));
-        }
-    });
-
-    RED.httpAdmin.delete('/postgresdb/:id',function(req,res) {
-        RED.nodes.deleteCredentials(req.params.id);
-        res.send(200);
-    });
-
-    RED.httpAdmin.post('/postgresdb/:id',function(req,res) {
-        var body = "";
-        req.on('data', function(chunk) {
-            body+=chunk;
-        });
-        req.on('end', function(){
-            var newCreds = querystring.parse(body);
-            var credentials = RED.nodes.getCredentials(req.params.id)||{};
-            if (newCreds.user == null || newCreds.user == "") {
-                delete credentials.user;
-            } else {
-                credentials.user = newCreds.user;
-            }
-            if (newCreds.password == "") {
-                delete credentials.password;
-            } else {
-                credentials.password = newCreds.password||credentials.password;
-            }
-            RED.nodes.addCredentials(req.params.id,credentials);
-            res.send(200);
-        });
-    });
-
-
-    function PostgresDatabaseNode(n) {
-        RED.nodes.createNode(this,n);
-        this.hostname = n.hostname;
-        this.port = n.port;
-        this.db = n.db;
-        this.ssl = n.ssl;
-        this.connectionString = n.connectionstring;
-
-    	var credentials = this.credentials;
-    	if (credentials) {
-    		this.user = credentials.user;
-    		this.password = credentials.password;
-    	}
-    }
-
-    function PostgresArrayNode(n) {
-        RED.nodes.createNode(this,n);
-
-        try {
-            this.columns = JSON.parse(n.columns);
-        } catch (e) {
-            node.error(e.message);
-            this.columns = [];
-        }
-    }
-
-
-    RED.nodes.registerType("postgresdb",PostgresDatabaseNode,{
-            credentials: {
-                user: {type:"text"},
-                password: {type: "password"}
-            }
-        });
-    RED.nodes.registerType("postgresarray",PostgresArrayNode);
-
-    pg.on('error', errorHandler);
-
-    function errorHandler(e) {
-        RED.error(e.Error);
-    }
-
-    function PostgresNode(n) {
-    	RED.nodes.createNode(this,n);
-
-        this.topic = n.topic;
-        this.postgresdb = n.postgresdb;
-        this.postgresConfig = RED.nodes.getNode(this.postgresdb);
-        this.sqlquery = n.sqlquery;
-        this.output = n.output;
-
-        var node = this;
-        var pool;
-
-        if(this.postgresConfig) {
-
-            var config = {};
-                        
-            if (node.postgresConfig.connectionString) { 
-                config = {connectionString : node.postgresConfig.connectionString} 
-            } else {
-                if (node.postgresConfig.user) { config.user = node.postgresConfig.user; }
-                if (node.postgresConfig.password) { config.password = node.postgresConfig.password; }
-                if (node.postgresConfig.hostname) { config.host = node.postgresConfig.hostname; }
-                if (node.postgresConfig.port) { config.port = node.postgresConfig.port; }
-                if (node.postgresConfig.db) { config.database = node.postgresConfig.db; }
-                config.ssl = node.postgresConfig.ssl;
-            }
-
-            if(!pools[this.postgresdb]) {
-                pool = new pg.Pool(config);
-                
-                //this.pool.connect(config);
-            } else {
-                pool = pools[this.postgresdb];
-            }
-
-            
-            
-    		node.on('input', async function(msg) { 
-                try {
-                    const client = await pool.connect();    
-                    named.patch(client);
-                    if(!msg.queryParameters) msg.queryParameters={};
-                    
-                    const result = await client.query(
-                        msg.payload,
-                        msg.queryParameters
-                    );
-
-                    client.release();
-                    if(node.output) {
-                        msg.payload = results.rows;
-                        node.send(msg);
-                    }
-                } catch (err) {
-                    node.error(err,msg);
-                }
-            });
-        } else {
-            this.error("missing postgres configuration");
-        }
-
-        this.on("close", function() {
-            if(node.clientdb) node.clientdb.end();
-            this.pool.end()
-
-            //pg.remove('error', errorHandler);
-        });
-
-        
-    }
-
-    function _prepareColumns(payload,columns) {
-        var allColumns = columns.length === 0;
-        if ((typeof payload !== "object") || (payload === null) || (Array.isArray(payload))) {
-            throw new Error("Invalid payload type");
-        }
-        var cols = {},
-            ok = true;
-        for (var key in payload) {
-            if (payload.propertyIsEnumerable(key)) {
-                if ( allColumns || ( columns.indexOf(key.toLowerCase()) !== -1)) {
-                    if (typeof payload[key] !== "object") {
-                        cols[key.toLowerCase()] = payload[key];
-                    } else {
-                        throw new Error("Invalid property type "+typeof payload[key]+"\n"+JSON.stringify(payload[key],null,4));
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if (ok) {
-            return cols;
-        }
-    }
-
-    function PostgresNodeInsert(n) {
-        var node = this;
-
-        RED.nodes.createNode(this,n);
-
-        this.allColumns = n.columns.length === 0;
-        this.columns = RED.nodes.getNode(n.columns).columns;
-        this.requireAll = n.requireAll;
-        this.table = n.table;
-
-        node.on("input",function (msg) {
-            try {
-                var cols = _prepareColumns(msg.payload,node.columns);
-                if ( !node.requireAll || (node.columns.length === Object.keys(cols).length ) ) {
-                    //Build query
-                    var query = pgBuilder(node.table).insert(cols).toString();
-                    node.send({
-                        payload : query
-                    });
-                } else {
-                    node.error("One or more columns are missing");
-                }
-            } catch (e) {
-                node.error(e.message);
-            }
-        });
-    }
-
-
-    function PostgresNodeUpdate(n) {
-        var node = this;
-
-        RED.nodes.createNode(this,n);
-
-        this.allColumns = n.columns.length === 0;
-        this.columns = RED.nodes.getNode(n.columns).columns;
-        this.where = RED.nodes.getNode(n.where).columns;
-        this.requireAll = n.requireAll;
-        this.requireAllWhere = n.requireAllWhere;
-        this.table = n.table;
-
-        node.on("input",function (msg) {
-            try {
-                var cols = _prepareColumns(msg.payload,node.columns),
-                    where= {};
-                if (msg.where) {
-                    where = _prepareColumns(msg.where,node.where);
-                }
-                if ( !node.requireAll || (node.columns.length === Object.keys(cols).length ) ) {
-                    //Build query
-                    var query = pgBuilder(node.table).update(cols);
-                    if ( !node.requireAllWhere || (node.where.length === Object.keys(where).length ) ) {
-                        if (Object.keys(where).length) {
-                            query = query.where(where);
-                        }
-                        node.send({
-                            payload : query.toString()
-                        });
-                    }
-                } else {
-                    node.error("One or more columns are missing");
-                }
-            } catch (e) {
-                node.error(e.message);
-            }
-        });
-    }
-
-    function PostgresNodeSelect(n) {
-        var node = this;
-
-        RED.nodes.createNode(this,n);
-
-        this.allColumns = n.columns.length === 0;
-        this.columns = RED.nodes.getNode(n.columns).columns;
-        this.where = RED.nodes.getNode(n.where).columns;
-        this.group = RED.nodes.getNode(n.group).columns;
-        this.order = RED.nodes.getNode(n.order).columns;
-        this.table = n.table;
-        this.noWhere = n.noWhere;
-        this.limit = n.limit || 0;
-        this.offset = n.offset || 0;
-
-        node.on("input",function (msg) {
-            try {
-                var where = {};
-                if (!node.noWhere) {
-                    where = _prepareColumns(msg.payload,node.where);
-                }
-                if ( !node.requireAll || (node.columns.length === Object.keys(where).length ) ) {
-                    //Build query
-                    var query = pgBuilder(node.table),
-                        limit = node.limit,
-                        offset = node.offset,
-                        group = node.group,
-                        order = node.order;
-
-                    if (!limit)  {
-                        limit = msg.limit ? msg.limit : 0;
-                    }
-
-                    if (!offset)  {
-                        offset = msg.offset ? msg.offset : 0;
-                    }
-
-                    query = (node.allColumns ? query.select() : query.select(node.columns));
-
-                    if (limit) {
-                        query = query.limit(limit);
-                    }
-
-                    if (group.length) {
-                        query = query.groupBy(group);
-                    }
-
-                    if (order.length) {
-                        query = query.orderBy(order);
-                    }
-
-                    if (Object.keys(where).length > 0) {
-                        query = query.where(where);
-                    }
-
-                    node.send({
-                        payload : query.offset(offset).toString()
-                    });
-                } else {
-                    node.error("One or more columns are missing");
-                }
-            } catch (e) {
-                node.error(e.message);
-            }
-        });
-    }
-
-    RED.nodes.registerType("PG Connection",PostgresNode);
-    RED.nodes.registerType("PG Insert",PostgresNodeInsert);
-    RED.nodes.registerType("PG Update",PostgresNodeUpdate);
-    RED.nodes.registerType("PG Select",PostgresNodeSelect);
-};
+ var { Pool } = require('pg');
+ var named = require('node-postgres-named');
+ var querystring = require('querystring');
+ 
+ module.exports = (RED) => {
+   RED.httpAdmin.get('/postgresdb/:id', (req, res) => {
+     var credentials = RED.nodes.getCredentials(req.params.id);
+     if (credentials) {
+       res.send(
+         JSON.stringify({
+           user: credentials.user,
+           hasPassword: credentials.password && credentials.password != '',
+         })
+       );
+     } else {
+       res.send(JSON.stringify({}));
+     }
+   });
+ 
+   RED.httpAdmin.delete('/postgresdb/:id', (req, res) => {
+     RED.nodes.deleteCredentials(req.params.id);
+     res.send(200);
+   });
+ 
+   RED.httpAdmin.post('/postgresdb/:id', (req, res) => {
+     var body = '';
+     req.on('data', (chunk) => {
+       body += chunk;
+     });
+     req.on('end', () => {
+       var newCreds = querystring.parse(body);
+       var credentials = RED.nodes.getCredentials(req.params.id) || {};
+       if (newCreds.user == null || newCreds.user == '') {
+         delete credentials.user;
+       } else {
+         credentials.user = newCreds.user;
+       }
+       if (newCreds.password == '') {
+         delete credentials.password;
+       } else {
+         credentials.password = newCreds.password || credentials.password;
+       }
+       RED.nodes.addCredentials(req.params.id, credentials);
+       res.send(200);
+     });
+   });
+ 
+   const PostgresDatabaseNode = function (n) {
+     RED.nodes.createNode(this, n);
+     this.hostname = n.hostname;
+     this.port = n.port;
+     this.db = n.db;
+     this.ssl = n.ssl;
+     this.connectionString = n.connectionstring;
+ 
+     var credentials = this.credentials;
+     if (credentials) {
+       this.user = credentials.user;
+       this.password = credentials.password;
+     }
+   };
+ 
+   RED.nodes.registerType('postgresdb', PostgresDatabaseNode, {
+     credentials: {
+       user: {
+         type: 'text',
+       },
+       password: {
+         type: 'password',
+       },
+     },
+   });
+ 
+   const PostgresNode = function (n) {
+     RED.nodes.createNode(this, n);
+ 
+     var node = this;
+ 
+     node.topic = n.topic;
+     node.postgresdb = n.postgresdb;
+     node.postgresConfig = RED.nodes.getNode(this.postgresdb);
+     node.sqlquery = n.sqlquery;
+     node.output = n.output;
+ 
+     if (node.postgresConfig) {
+       var connectionConfig = {};
+ 
+       if (node.postgresConfig.connectionString) {
+         connectionConfig = {
+           connectionString: node.postgresConfig.connectionString,
+         };
+       } else {
+         connectionConfig = {
+           user: node.postgresConfig.user,
+           password: node.postgresConfig.password,
+           host: node.postgresConfig.hostname,
+           port: node.postgresConfig.port,
+           database: node.postgresConfig.db,
+           ssl: node.postgresConfig.ssl,
+         };
+       }
+ 
+       var handleError = (err, msg) => {
+         //node.error(msg); This line is committed and edited to take the msg object also.
+         // This allows the error to be caught with a Catch node.
+         node.error(err, msg);
+         console.log(err);
+         console.log(msg.payload);
+       };
+ 
+       var pool = new Pool(connectionConfig);
+ 
+       node.on('input', async (msg) => {
+         // if (!Array.isArray(msg.payload)) {
+         //   // Useful error message for transitioning from `postgres` to `postgres-multi`
+         //   handleError(new Error('msg.payload must be an array of queries'));
+         //   return;
+         // }
+ 
+         try {
+           const client = await pool.connect();
+           const query = msg.payload;
+           named.patch(client);
+ 
+           try {
+             if (!msg.queryParameters) msg.queryParameters = {};
+             const result = await client.query(query, msg.queryParameters);
+ 
+             if (result && node.output) {
+               // Save count of rows returned by a query
+               msg.payload = result.rows;
+               node.send(msg);
+             }
+           } catch (e) {
+             // Assign -1 to result count to indicate query failure
+             handleError(e, msg);
+           } finally {
+           }
+           client.release();
+ 
+         } catch (e) {
+           handleError(e, msg);
+         }
+       });
+     } else {
+       this.error('missing postgres configuration');
+     }
+   };
+ 
+   RED.nodes.registerType('PG Connection', PostgresNode);
+ };
+ 
