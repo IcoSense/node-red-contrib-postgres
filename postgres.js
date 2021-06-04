@@ -21,7 +21,7 @@ module.exports = function(RED) {
     var pgBuilder = require('knex')({client: 'pg'});
     var named=require('node-postgres-named');
     var querystring = require('querystring');
-
+    var pools = {};
     RED.httpAdmin.get('/postgresdb/:id',function(req,res) {
         var credentials = RED.nodes.getCredentials(req.params.id);
         if (credentials) {
@@ -111,61 +111,49 @@ module.exports = function(RED) {
         this.output = n.output;
 
         var node = this;
+        var pool;
 
         if(this.postgresConfig) {
-            
-    		node.on('input', function(msg){
+
+            var config = {};
+                        
+            if (node.postgresConfig.connectionString) { 
+                config = {connectionString : node.postgresConfig.connectionString} 
+            } else {
+                if (node.postgresConfig.user) { config.user = node.postgresConfig.user; }
+                if (node.postgresConfig.password) { config.password = node.postgresConfig.password; }
+                if (node.postgresConfig.hostname) { config.host = node.postgresConfig.hostname; }
+                if (node.postgresConfig.port) { config.port = node.postgresConfig.port; }
+                if (node.postgresConfig.db) { config.database = node.postgresConfig.db; }
+                config.ssl = node.postgresConfig.ssl;
+            }
+
+            if(!pools[this.postgresdb]) {
+                pool = new pg.Pool(config);
                 
+                //this.pool.connect(config);
+            } else {
+                pool = pools[this.postgresdb];
+            }
+
+            
+            
+    		node.on('input', async function(msg) { 
                 try {
-                    var config = {};
+                    const client = await pool.connect();    
+                    named.patch(client);
+                    if(!msg.queryParameters) msg.queryParameters={};
                     
-                    if (node.postgresConfig.connectionString) { 
-                      config = node.postgresConfig.connectionString 
-                    } else {
-                      if (node.postgresConfig.user) { config.user = node.postgresConfig.user; }
-                      if (node.postgresConfig.password) { config.password = node.postgresConfig.password; }
-                      if (node.postgresConfig.hostname) { config.host = node.postgresConfig.hostname; }
-                      if (node.postgresConfig.port) { config.port = node.postgresConfig.port; }
-                      if (node.postgresConfig.db) { config.database = node.postgresConfig.db; }
-                      config.ssl = node.postgresConfig.ssl;
+                    const result = await client.query(
+                        msg.payload,
+                        msg.queryParameters
+                    );
+
+                    client.release();
+                    if(node.output) {
+                        msg.payload = results.rows;
+                        node.send(msg);
                     }
-
-                    
-
-                    pg.connect( config, function(err, client, done) {
-
-                        try {
-                            
-                            if(err) {
-                                err.queryParameters = msg.queryParameters;
-                                console.log(err);
-                                node.error(err);
-                            } else {
-                                named.patch(client);
-                                if(!msg.queryParameters) msg.queryParameters={};
-                                
-                                client.query(
-                                    msg.payload,
-                                    msg.queryParameters,
-                                    function (err, results) {
-                                        done();
-                                        if(err) {
-                                            node.error(err);
-                                        }
-                                        else {
-                                        if(node.output) {
-                                                msg.payload = results.rows;
-                                                node.send(msg);
-                                            }
-                                        }
-                                    }
-                                );
-                            }
-                        } catch (error) {
-                            node.error(error, msg);
-                        }
-                    });
-
                 } catch (err) {
                     node.error(err,msg);
                 }
@@ -176,6 +164,8 @@ module.exports = function(RED) {
 
         this.on("close", function() {
             if(node.clientdb) node.clientdb.end();
+            this.pool.end()
+
             //pg.remove('error', errorHandler);
         });
 
